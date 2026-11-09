@@ -1,0 +1,2 @@
+# The sdkconfig.board keys an app may set in its own sdkconfig.defaults (rule B5).
+CONFIG_BT_ENABLED

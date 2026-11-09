@@ -1,0 +1,334 @@
+# Builds and checks every app a pull request adds or moves, then keeps one
+# comment on the pull request with the result. `report` is the job to require.
+# On main the same checks run on what the merge brought, and `publish` puts
+# each app that passed on the marketplace, submitted for review.
+name: app
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A pull request's new push cancels its old run; a run of main is never
+# cancelled, since each one publishes what its own push changed.
+concurrency:
+  group: app-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The rule script's own tests, against KodeOS's kappdata.py.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_KEY }}
+          owner: kodediy
+      - name: Fetch kappdata.py from KodeOS
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/kodeos_tools"
+          gh api repos/kodediy/KodeOS/contents/tools/kappdata.py \
+            -H 'Accept: application/vnd.github.raw' > "$RUNNER_TEMP/kodeos_tools/kappdata.py"
+      - name: Run the tests
+        run: KODEOS_TOOLS="$RUNNER_TEMP/kodeos_tools" tools/run_tests.sh
+
+  # The catalog's own checks, and one matrix entry per app the pull request or the push changes.
+  find:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+      count: ${{ steps.find.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_KEY }}
+          owner: kodediy
+      - name: Fetch what the checks read
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          mkdir -p inputs
+          gh api repos/kodediy/KodeOS/contents/tools/kappdata.py \
+            -H 'Accept: application/vnd.github.raw' > inputs/kappdata.py
+          gh release list -R kodediy/kode-sdk --exclude-drafts --exclude-pre-releases \
+            --limit 100 --json tagName > inputs/releases.json
+          # B1 checks a module SDK's pin against that repository's own releases.
+          grep -v '^#' tools/module_sdks.txt | while read -r git; do
+            [ -n "$git" ] || continue
+            repo=${git#git@github.com:}
+            gh release list -R "${repo%.git}" --exclude-drafts --exclude-pre-releases \
+              --limit 100 --json tagName | jq --arg g "$git" '{($g): map(.tagName)}'
+          done | jq -s 'add // {}' > inputs/module_releases.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inputs
+          path: inputs/
+      - id: find
+        name: Check the catalog and list the changed apps
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          mkdir -p findings
+          catalog_status=0
+          python3 -I tools/check_app.py catalog --catalog . --base "$BASE" --head "$HEAD" \
+            > findings/catalog.txt || catalog_status=$?
+          cat findings/catalog.txt
+          raw() { gh api "$1" -H 'Accept: application/vnd.github.raw'; }
+          newest=$(jq -r 'map(.tagName) | map(select(test("^v[0-9]+[.][0-9]+[.][0-9]+$")))
+                          | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last' inputs/releases.json)
+          entries=()
+          while read -r kind name old new; do
+            [ "$kind" = change ] || continue
+            if [ "$new" = - ]; then
+              printf 'status=removed\n' > "findings/$name.meta"
+              if [ "$GITHUB_EVENT_NAME" = push ]; then
+                echo "::warning::$name left the catalog; its marketplace listing stays until it is deleted by hand"
+              fi
+              continue
+            fi
+            mkdir -p "pin/$name/main"
+            raw "repos/kodediy/kode-app-$name/contents/main/idf_component.yml?ref=$new" \
+              > "pin/$name/main/idf_component.yml" || true
+            # A pin B1 will refuse still builds, on the newest release, so the rest gets checked.
+            tag=$(python3 -I tools/check_app.py sdk-tag "pin/$name" 2>/dev/null) || tag="$newest"
+            idf=$(raw "repos/kodediy/kode-sdk/contents/.github/workflows/target-build.yml?ref=$tag" 2>/dev/null \
+                  | sed -n 's/.*esp_idf_version: *\(v[0-9.]*\).*/\1/p' | head -1)
+            if [ -z "$idf" ]; then
+              tag="$newest"
+              idf=$(raw "repos/kodediy/kode-sdk/contents/.github/workflows/target-build.yml?ref=$tag" \
+                    | sed -n 's/.*esp_idf_version: *\(v[0-9.]*\).*/\1/p' | head -1)
+            fi
+            entries+=("$(jq -cn --arg n "$name" --arg o "$old" --arg w "$new" --arg t "$tag" --arg i "$idf" \
+                         '{name: $n, old: $o, new: $w, sdk_tag: $t, idf: $i}')")
+          done < findings/catalog.txt
+          if [ "${#entries[@]}" -eq 0 ]; then
+            matrix='{"include":[]}'
+          else
+            matrix=$(printf '%s\n' "${entries[@]}" | jq -cs '{include: .}')
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=${#entries[@]}" >> "$GITHUB_OUTPUT"
+          echo "catalog_status=$catalog_status" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: findings-catalog
+          path: findings/
+      - name: Fail on a catalog reject
+        run: test "$catalog_status" = 0
+
+  # One app: build it in its SDK's ESP-IDF, scan its history, run the rules.
+  check:
+    needs: [tests, find]
+    if: always() && needs.tests.result == 'success' && fromJSON(needs.find.outputs.count || '0') > 0
+    name: check ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: espressif/idf:${{ matrix.idf }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.find.outputs.matrix) }}
+    env:
+      NAME: ${{ matrix.name }}
+      OLD: ${{ matrix.old }}
+      SDK_TAG: ${{ matrix.sdk_tag }}
+      GITLEAKS_VERSION: 8.21.2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record a failure until the rules have run
+        run: |
+          mkdir -p findings
+          printf 'version=unknown\nstatus=failed\n' > "findings/$NAME.meta"
+      - id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_KEY }}
+          owner: kodediy
+      - uses: actions/download-artifact@v4
+        with:
+          name: inputs
+          path: ${{ runner.temp }}/inputs
+      - name: Fetch the app and its SDK
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          git config --global --add safe.directory '*'
+          # Every kodediy URL, SSH pins included, goes through the app token.
+          base="https://x-access-token:${TOKEN}@github.com/kodediy/"
+          git config --global url."$base".insteadOf "git@github.com:kodediy/"
+          git config --global --add url."$base".insteadOf "https://github.com/kodediy/"
+          git submodule update --init "apps/$NAME"
+          if [ "$OLD" != - ]; then
+            git -C "apps/$NAME" show "$OLD:CMakeLists.txt" > "$RUNNER_TEMP/old_cmake.txt" 2>/dev/null \
+              || rm -f "$RUNNER_TEMP/old_cmake.txt"
+          fi
+          git clone -q --depth 1 --branch "$SDK_TAG" https://github.com/kodediy/kode-sdk.git "$RUNNER_TEMP/sdk"
+      - name: Build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          if idf.py -C "apps/$NAME" build; then
+            echo "BUILD_OK=1" >> "$GITHUB_ENV"
+          else
+            echo "BUILD_OK=0" >> "$GITHUB_ENV"
+          fi
+      - name: Scan the app's history for secrets
+        shell: bash
+        run: |
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "$url" | tar -xz -C "$RUNNER_TEMP" gitleaks
+          # The catalog's settings, never the app's, over the history of the pinned commit only.
+          "$RUNNER_TEMP/gitleaks" detect --source "apps/$NAME" --config tools/gitleaks.toml \
+            --log-opts=HEAD --report-format json --report-path "$RUNNER_TEMP/gitleaks.json" \
+            --exit-code 0 --no-banner
+      - id: ver
+        name: Run the rules
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          mkdir -p findings
+          args=(--app "apps/$NAME" --catalog . --sdk "$RUNNER_TEMP/sdk"
+                --releases "$RUNNER_TEMP/inputs/releases.json"
+                --module-releases "$RUNNER_TEMP/inputs/module_releases.json" --kappdata-dir "$RUNNER_TEMP/inputs"
+                --secrets-report "$RUNNER_TEMP/gitleaks.json" --output "findings/$NAME.txt")
+          [ "$BUILD_OK" = 1 ] && args+=(--build "apps/$NAME/build")
+          [ -f "$RUNNER_TEMP/old_cmake.txt" ] && args+=(--old-cmake "$RUNNER_TEMP/old_cmake.txt")
+          check_status=0
+          python3 -I tools/check_app.py check "${args[@]}" || check_status=$?
+          version=$(python3 -I tools/check_app.py version "apps/$NAME" 2>/dev/null || echo unknown)
+          status=built
+          [ "$BUILD_OK" = 1 ] || status=failed
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf 'version=%s\nstatus=%s\nartifact=%s\n' "$version" "$status" "$run_url" > "findings/$NAME.meta"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "CHECK_STATUS=$check_status" >> "$GITHUB_ENV"
+      - if: env.BUILD_OK == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-${{ steps.ver.outputs.version }}.bin
+          path: apps/${{ matrix.name }}/build/${{ matrix.name }}.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-${{ steps.ver.outputs.version }}-appdata
+          path: apps/${{ matrix.name }}/appdata/
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-${{ matrix.name }}
+          path: findings/
+      - name: Fail on a failed build or a reject
+        run: test "$BUILD_OK" = 1 && test "$CHECK_STATUS" = 0
+
+  # On main: each app the push added or moved, with the .bin the rules just
+  # passed, goes to the marketplace under the publisher Kode and is submitted
+  # for review. Never two uploads of one app at once, and publish_app.py skips
+  # a version the marketplace already has or tops, so a late run never puts an
+  # old one back.
+  publish:
+    needs: [find, check]
+    if: github.event_name == 'push' && needs.check.result == 'success'
+    name: publish ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-${{ matrix.name }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.find.outputs.matrix) }}
+    env:
+      NAME: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_KEY }}
+          owner: kodediy
+      - name: Fetch the app
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/kodediy/".insteadOf "https://github.com/kodediy/"
+          git submodule update --init "apps/$NAME"
+      - uses: actions/download-artifact@v4
+        with:
+          name: inputs
+          path: ${{ runner.temp }}/inputs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ matrix.name }}-*.bin
+          path: ${{ runner.temp }}/bin
+          merge-multiple: true
+      - name: Publish on the marketplace
+        env:
+          KODE_MARKETPLACE_TOKEN: ${{ secrets.KODE_MARKETPLACE_TOKEN }}
+        run: |
+          python3 -I tools/publish_app.py --app "apps/$NAME" --bin "$RUNNER_TEMP/bin/$NAME.bin" \
+            --kappdata-dir "$RUNNER_TEMP/inputs" --as kode
+
+  # The one comment on the pull request, and the one result to require.
+  report:
+    needs: [tests, find, check]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: findings-*
+          path: findings
+          merge-multiple: true
+      - name: Post or update the comment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          TESTS: ${{ needs.tests.result }}
+          FIND: ${{ needs.find.result }}
+          CHECK: ${{ needs.check.result }}
+        run: |
+          mkdir -p findings
+          python3 -I tools/pr_comment.py findings --results "tests=$TESTS,find=$FIND,check=$CHECK" > comment.md
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                 --jq '.[] | select(.body | startswith("<!-- kode-apps-check -->")) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
+      - name: Fail when any job failed
+        env:
+          RESULTS: ${{ needs.tests.result }} ${{ needs.find.result }} ${{ needs.check.result }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::a job ended '$r'"; exit 1 ;;
+            esac
+          done

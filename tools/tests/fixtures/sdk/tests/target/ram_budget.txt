@@ -1,0 +1,70 @@
+# The budget of internal RAM for this project, both variants, read by
+# tools/check_ram.sh:
+#
+#   ../../tools/check_ram.sh build/kode_target.elf ram_budget.txt
+#
+# This project links every component of the SDK with every option on, so
+# what it takes of the ESP32-P4's 640 KB of internal RAM at link time is what
+# the SDK costs an app before the app adds a line of its own.
+#
+# static_max is the ceiling of that static image - code in IRAM, .data and
+# .bss. It sits a few kilobytes above what the full variant takes, on
+# purpose: a change that needs more either moves something to PSRAM or raises
+# this number in the same commit, where a reviewer sees it.
+static_max 360000
+
+# Every data symbol of 2048 bytes or more in internal RAM, with the source
+# file that defines it and the most it may be. A static this size that is not
+# listed fails the check: a buffer belongs in PSRAM (khal_alloc_psram()), and
+# the ones below are here because something forces them to be internal.
+#
+# symbol               source file          max bytes
+
+# The stacks of the Active Objects (kqp_config.h's tiers). Internal because
+# an AO may write flash, which takes PSRAM out of reach while the write lasts.
+console_stack          kode.c               8192
+appmgr_stack           kode.c               8192
+storage_stack          kode.c               6144
+radio_stack            kode.c               6144
+nfc_stack              kode.c               6144
+display_stack          kode.c               6144
+touch_stack            kode.c               4096
+power_stack            kode.c               4096
+net_stack              kode.c               4096
+log_stack              kode.c               4096
+ioexp_stack            kode.c               4096
+imu_stack              kode.c               4096
+boot_stack             kode.c               4096
+autotest_stack         kode.c               4096
+rfid_stack             kode.c               3072
+ledmgr_stack           kode.c               3072
+ir_stack               kode.c               3072
+haptic_stack           kode.c               3072
+buttons_stack          kode.c               3072
+audio_stack            kode.c               3072
+
+# QP/C's three event pools.
+s_jumbo_pool           kqp.c                16560
+s_medium_pool          kqp.c                16128
+s_large_pool           kqp.c                16128
+
+# The console's Active Object. It grows with the verbs, so the line leaves
+# room.
+l_console              console_ao.c         4096
+
+# The SDK's own buffers and tables.
+s_mirror_ring_store    kdrv_ble.c           8192
+s_ring_store           kdrv_ble.c           2048
+s_wifi                 kdrv_wifi.c          4608
+s_recv_buf             appmgr_ao.c          4096
+s_adopt_buf            appmgr_ao.c          4096
+s_fs_buf               kode.c               4096
+s_blob                 kapp_cat.c           2560
+s_rows                 kapp_cat.c           2560
+
+# What the libraries declare. Listed so that a version bump that grows one
+# of them is seen.
+lv_global              lv_init.c            17408
+xIsrStack              port.c               4192
+s_retention            sleep_retention.c    2816
+gNfcDev                rfal_nfc.c           2560

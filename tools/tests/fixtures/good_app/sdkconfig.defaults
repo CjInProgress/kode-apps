@@ -1,0 +1,10 @@
+# The board's partition table, from the fetched SDK. (ESP-IDF)
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="managed_components/kodediy__kbsp/partitions.csv"
+# An app never writes otadata. (kaos)
+CONFIG_KODEOS_BOOT_ROLE_APP=y
+# No radio. (kaos)
+CONFIG_KODEOS_RADIO=n
+# No esp-hosted either, since Kconfig cannot deselect it. (esp_hosted)
+CONFIG_ESP_HOSTED_ENABLED=n
+# No BLE host without the radio. (ESP-IDF)
+CONFIG_BT_ENABLED=n

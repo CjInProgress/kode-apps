@@ -1,0 +1,3 @@
+# Categories of the test catalog.
+tools
+games

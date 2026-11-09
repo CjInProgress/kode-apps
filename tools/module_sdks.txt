@@ -1,0 +1,6 @@
+# The module SDKs an app may pin next to kode-sdk (rule B1), one git URL per line.
+# Each is a repository of its own, pinned to one of its published releases.
+git@github.com:kodediy/kode-camera-sdk.git
+git@github.com:kodediy/kode-fck-sdk.git
+git@github.com:kodediy/kode-mesh-sdk.git
+git@github.com:kodediy/kode-robotics-sdk.git

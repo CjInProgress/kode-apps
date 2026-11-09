@@ -1,0 +1,7 @@
+# The categories an app may declare (rule A3). Edited by the catalog's owner.
+ai
+communication
+games
+media
+tools
+wireless

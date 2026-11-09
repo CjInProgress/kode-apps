@@ -1,0 +1,6 @@
+# The secret scanner's settings for every app (rule C11): gitleaks' own rules,
+# nothing allowed. An app's .gitleaks.toml is refused, so this is the only one.
+title = "kode-apps catalog"
+
+[extend]
+useDefault = true

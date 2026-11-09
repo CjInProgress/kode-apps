@@ -1,0 +1,3 @@
+# The fixture's internal-RAM budget, read by the SDK's tools/check_ram.sh.
+static_max 360000
+s_stack good_app_ao.c 8192

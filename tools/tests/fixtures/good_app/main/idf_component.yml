@@ -1,0 +1,10 @@
+## The SDK, one release for every kodediy component.
+dependencies:
+  kodediy/kode:
+    git: git@github.com:kodediy/kode-sdk.git
+    path: components/kode
+    version: v00.00.27
+  kodediy/kui:
+    git: git@github.com:kodediy/kode-sdk.git
+    path: components/kui
+    version: v00.00.27

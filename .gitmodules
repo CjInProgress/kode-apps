@@ -1,0 +1,6 @@
+[submodule "apps/led"]
+	path = apps/led
+	url = ../kode-app-led.git
+[submodule "apps/kodecraft"]
+	path = apps/kodecraft
+	url = ../kode-app-kodecraft.git
