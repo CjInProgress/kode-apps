@@ -49,6 +49,9 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
 # The same, for esp-hosted. (esp_hosted)
 CONFIG_ESP_HOSTED_CP_TARGET_ESP32C5=y
+# esp-hosted only when KODEOS_RADIO selects it: built in, it claims the SDMMC
+# controller before app_main, radio or not. (esp_hosted)
+CONFIG_ESP_HOSTED_ENABLED=n
 # SDIO slot 1 with this board's pins and the C5's reset on GPIO23. (esp_hosted)
 CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
 CONFIG_ESP_HOSTED_P4_DEV_BOARD_NONE=y
