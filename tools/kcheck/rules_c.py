@@ -13,7 +13,7 @@ from kcheck import source
 from kcheck.core import Finding, rule
 
 AO_FILE = re.compile(r"QState\s+\w+\s*\([^)]*QEvt\s+const\s*\*")
-# The names are kode.h's own: a name the SDK does not declare never matches.
+# Each name is one the SDK or FreeRTOS declares: a name nobody declares never matches.
 BLOCKING = ("kode_delay", "kode_net_ping", "kode_http_get", "kode_udp_send", "kode_net_resolve",
             "kode_imu_read", "vTaskDelay", "xSemaphoreTake", "khal_sem_wait_timeout", "kode_nfc_read",
             "kode_nfc_read_id", "kode_rfid_read_id")
